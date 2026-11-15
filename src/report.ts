@@ -4,20 +4,7 @@ import type { Pull } from './select.ts';
 /** Starts the one comment the bot keeps on a pull request, so later runs edit it in place. */
 export const MARKER = '<!-- remain -->';
 
-/**
- * The commits the bot made on a pull request, kept in its comment. Only the bot's token can edit
- * that comment, unlike a commit's author name, which anyone can set, so the digest trusts this list.
- */
-const PUSHED = /<!-- remain:pushed ([0-9a-f ]*) -->/;
-
-export function parsePushed(body: string): string[] {
-	return (PUSHED.exec(body)?.[1] ?? '').split(' ').filter((sha) => sha !== '');
-}
-
-function finish(lines: string[], pushed: string[]): string {
-	const body = lines.join('\n').trimEnd();
-	return pushed.length > 0 ? `${body}\n<!-- remain:pushed ${pushed.join(' ')} -->` : body;
-}
+const finish = (lines: string[]): string => lines.join('\n').trimEnd();
 
 const code = (path: string): string => `\`${path}\``;
 
@@ -31,38 +18,32 @@ function resolvedLines(classification: Classification): string[] {
 	];
 }
 
-export function ownerComment(base: string, classification: Classification, pushed: string[]): string {
+export function ownerComment(base: string, classification: Classification): string {
 	const groups = classification.owner.flatMap((group) => [
 		`**${group.cause}**`,
 		...group.paths.map((path) => `- ${code(path)}`),
 		'',
 	]);
 	const resolved = resolvedLines(classification);
-	return finish(
-		[
-			MARKER,
-			`\`${base}\` can't be merged in automatically. These files need you:`,
-			'',
-			...groups,
-			...(resolved.length > 0 ? ['These would have been resolved:', '', ...resolved] : []),
-		],
-		pushed,
-	);
+	return finish([
+		MARKER,
+		`\`${base}\` can't be merged in automatically. These files need you:`,
+		'',
+		...groups,
+		...(resolved.length > 0 ? ['These would have been resolved:', '', ...resolved] : []),
+	]);
 }
 
-export function failedComment(base: string, error: string, runUrl: string, pushed: string[]): string {
-	return finish([MARKER, `\`${base}\` can't be merged in automatically: ${error}. [Run](${runUrl})`], pushed);
+export function failedComment(base: string, error: string, runUrl: string): string {
+	return finish([MARKER, `\`${base}\` can't be merged in automatically: ${error}. [Run](${runUrl})`]);
 }
 
-export function pushedComment(base: string, sha: string, classification: Classification, pushed: string[]): string {
-	return finish(
-		[MARKER, `Merged \`${base}\` in with ${sha.slice(0, 9)}:`, '', ...resolvedLines(classification)],
-		pushed,
-	);
+export function pushedComment(base: string, sha: string, classification: Classification): string {
+	return finish([MARKER, `Merged \`${base}\` in with ${sha.slice(0, 9)}:`, '', ...resolvedLines(classification)]);
 }
 
-export function clearedComment(pushed: string[]): string {
-	return finish([MARKER, 'No conflicts left.'], pushed);
+export function clearedComment(): string {
+	return finish([MARKER, 'No conflicts left.']);
 }
 
 export interface DigestEntry {
@@ -96,16 +77,15 @@ export function sinceApproval(pull: Pull, approvers: string[]): { approved: stri
 
 /**
  * Pull requests where everything since an approver's last approval is the bot's own merges, so
- * re-approving them is all they need. One with anyone else's commits since, or whose approved
- * commit is gone, isn't listed: it needs a full review.
+ * re-approving them is all they need. `isOwn` decides which commits are the bot's. One with anyone
+ * else's commits since, or whose approved commit is gone, isn't listed: it needs a full review.
  */
-export function digest(pulls: Pull[], approvers: string[], pushedOn: (pull: Pull) => string[]): DigestEntry[] {
+export function digest(pulls: Pull[], approvers: string[], isOwn: (sha: string) => boolean): DigestEntry[] {
 	const entries: DigestEntry[] = [];
 	for (const pull of pulls) {
 		const range = sinceApproval(pull, approvers);
 		if (!range || range.since.length === 0) continue;
-		const pushed = new Set(pushedOn(pull));
-		if (!range.since.every((sha) => pushed.has(sha))) continue;
+		if (!range.since.every(isOwn)) continue;
 		const repoUrl = pull.url.replace(/\/pull\/\d+$/, '');
 		entries.push({
 			number: pull.number,

@@ -7,13 +7,19 @@ branding:
 
 inputs:
   mode:
-    description: '`merge` (no secrets: merges and runs the regenerate commands) or `push` (with the App token: checks and pushes)'
+    description: '`list` (the pull requests with files to rebuild, as the `pulls` output), `merge` (one pull request, no secrets: runs its regenerate commands) or `push` (with the App token: checks and pushes)'
     required: true
+  pull:
+    description: 'Merge mode: the pull request number to rebuild files for'
+    default: ''
   token:
     description: 'Reads pull requests; in push mode also labels and comments (pull-requests write)'
     default: ${{ github.token }}
   app-token:
     description: 'Push mode: a GitHub App installation token with contents and workflows write, so the push runs CI'
+    default: ''
+  app-slug:
+    description: "Push mode: the App's slug (create-github-app-token's app-slug output), to tell its commits apart for the digest"
     default: ''
   base:
     description: 'The branch merged into the pull requests based on it, and where the config is read [default: the default branch]'
@@ -34,3 +40,7 @@ inputs:
 runs:
   using: node24
   main: dist/main.mjs
+
+outputs:
+  pulls:
+    description: 'List mode: a JSON list of the pull request numbers whose merge needs files rebuilt'

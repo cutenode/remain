@@ -30,6 +30,10 @@ export class FakeGitHub implements GitHubApi {
 	readonly failures = new Map<string, number>();
 	pullList: Pull[] = [];
 	readonly ids = { next: 1 };
+	/** Whether GitHub signs the commits made through the API, which nobody knows yet for an App. */
+	readonly signing = { on: false };
+	/** Who made each commit through the API, and whether it was signed. */
+	readonly made = new Map<string, { login: string; verified: boolean }>();
 	author: string;
 
 	constructor(remote: string, author = 'github-actions[bot]') {
@@ -91,7 +95,15 @@ export class FakeGitHub implements GitHubApi {
 			const { message, tree, parents } = body as { message: string; tree: string; parents: string[] };
 			const args = ['-c', 'user.name=app', '-c', 'user.email=app@example.com', 'commit-tree', tree, '-m', message];
 			const sha = gitOut(remote, [...args, ...parents.flatMap((parent) => ['-p', parent])]);
-			return { sha, verification: { verified: false, reason: 'unsigned' } } as T;
+			const verified = this.signing.on;
+			this.made.set(sha, { login: this.author, verified });
+			return { sha, verification: { verified, reason: verified ? 'valid' : 'unsigned' } } as T;
+		}
+		const commit = /^commits\/([0-9a-f]{40})$/.exec(path)?.[1];
+		if (method === 'GET' && commit) {
+			// A commit pushed with git is unsigned here, whatever its author and committer say.
+			const made = this.made.get(commit) ?? { login: 'someone', verified: false };
+			return { committer: { login: made.login }, commit: { verification: { verified: made.verified } } } as T;
 		}
 		const ref = /^git\/refs\/(heads\/.+)$/.exec(path)?.[1];
 		if (method === 'PATCH' && ref) {

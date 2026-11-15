@@ -15,7 +15,6 @@ import {
 	failedComment,
 	MARKER,
 	ownerComment,
-	parsePushed,
 	pushedComment,
 	renderDigest,
 	sinceApproval,
@@ -27,8 +26,8 @@ export interface Options {
 	/** A checkout of the repository, with `origin` pointing at GitHub. */
 	repo: string;
 	github: GitHubApi;
-	/** Push mode: GitHub as the App, which writes the merge commits. */
-	appGitHub?: GitHubApi;
+	/** Push mode: GitHub as the App, which writes the merge commits, and the App's bot login. */
+	app?: { github: GitHubApi; login: string };
 	/** The branch merged into pull requests based on it, and the one the config is read from. */
 	base?: string;
 	/** For fetching; sent in a header for each fetch, never saved in .git/config. */
@@ -41,7 +40,13 @@ export interface Options {
 	commentAuthor: string;
 	runUrl: string;
 	summary?: string;
+	/** Merge mode: the one pull request to rebuild files for, so each runs in a job of its own. */
+	pull?: number;
+	/** List mode: the step's GITHUB_OUTPUT file. */
+	output?: string;
 }
+
+export type Mode = 'list' | 'merge' | 'push';
 
 /** What the merge job hands the push job for one pull request. */
 interface Plan {
@@ -121,7 +126,12 @@ function prepared(context: Context, pull: Pull): Prepared | string {
 	return prepare(repo, join(scratch, String(pull.number)), head, base, context.attrTree, context.config);
 }
 
-function mergeOne(context: Context, pick: Pick, event: PullEvent): number | undefined {
+/**
+ * Merges one pull request's base in and, when every conflict is mechanical and some file needs
+ * rebuilding, returns its number. With `rebuild` it also runs the regen commands and writes the plan
+ * the push job reads.
+ */
+function mergeOne(context: Context, pick: Pick, event: PullEvent, rebuild: boolean): number | undefined {
 	const { options } = context;
 	const { pull } = pick;
 	const result = pick.action === 'skip' ? pick.reason : prepared(context, pull);
@@ -133,6 +143,7 @@ function mergeOne(context: Context, pick: Pick, event: PullEvent): number | unde
 		const { classification } = result;
 		event.set(classificationFields(classification));
 		if (!isMechanical(classification) || classification.regen.length === 0) return undefined;
+		if (!rebuild) return pull.number;
 		const base = gitOut(result.dir, ['rev-parse', 'MERGE_HEAD']);
 		const plan: Plan = { number: pull.number, head: pull.headRefOid, base, ok: true, files: [] };
 		for (const group of classification.regen) {
@@ -154,24 +165,42 @@ function mergeOne(context: Context, pick: Pick, event: PullEvent): number | unde
 	}
 }
 
-function mergeMode(context: Context): void {
-	const { options } = context;
-	mkdirSync(options.plans, { recursive: true });
-	const planned: number[] = [];
-	for (const pick of context.picks) {
-		const event = pullEvent('merge', pick.pull);
+/** Runs `each` on the picks, with one wide event per pull request. */
+function eachPick<T>(picks: Pick[], mode: Mode, each: (pick: Pick, event: PullEvent) => T): T[] {
+	return picks.map((pick) => {
+		const event = pullEvent(mode, pick.pull);
 		try {
-			const number = mergeOne(context, pick, event);
-			if (number !== undefined) planned.push(number);
+			return each(pick, event);
 		} catch (error) {
 			event.error(error as Error);
 			throw error;
 		} finally {
 			event.emit();
 		}
-	}
-	// Always written, so the artifact upload and download have a file even when nothing was rebuilt.
-	writeFileSync(join(options.plans, 'index.json'), JSON.stringify(planned));
+	});
+}
+
+/**
+ * The pull requests with files to rebuild, for the caller's matrix of merge jobs. Listing runs no
+ * repository code: git merges with hooks off and no drivers but union.
+ */
+function listMode(context: Context): void {
+	const pulls = eachPick(context.picks, 'list', (pick, event) => mergeOne(context, pick, event, false)).filter(
+		(number) => number !== undefined,
+	);
+	if (context.options.output) appendFileSync(context.options.output, `pulls=${JSON.stringify(pulls)}\n`);
+}
+
+/**
+ * Rebuilds one pull request's files. Each runs in its own job, so one pull request's regen command,
+ * which is its own code, can't touch the files rebuilt for another.
+ */
+function mergeMode(context: Context): void {
+	const { options } = context;
+	if (options.pull === undefined) throw new Error('merge mode needs pull');
+	mkdirSync(options.plans, { recursive: true });
+	const picks = context.picks.filter((pick) => pick.pull.number === options.pull);
+	eachPick(picks, 'merge', (pick, event) => mergeOne(context, pick, event, true));
 }
 
 interface IssueComment {
@@ -214,7 +243,6 @@ function pushOne(context: Context, appGitHub: GitHubApi, pull: Pull, event: Pull
 	const { options, config } = context;
 	const { github } = options;
 	const comment = ownComment(context, pull.number);
-	const pushed = parsePushed(comment?.body ?? '');
 	const needsOwner = (body: string) => {
 		event.set({ outcome: 'needs owner' });
 		setLabel(github, pull, config.label, true);
@@ -229,7 +257,7 @@ function pushOne(context: Context, appGitHub: GitHubApi, pull: Pull, event: Pull
 		const { classification } = result;
 		event.set(classificationFields(classification));
 		if (!isMechanical(classification)) {
-			needsOwner(ownerComment(pull.baseRefName, classification, pushed));
+			needsOwner(ownerComment(pull.baseRefName, classification));
 			return;
 		}
 		const base = gitOut(result.dir, ['rev-parse', 'MERGE_HEAD']);
@@ -241,7 +269,7 @@ function pushOne(context: Context, appGitHub: GitHubApi, pull: Pull, event: Pull
 				return;
 			}
 			if (!plan.ok) {
-				needsOwner(failedComment(pull.baseRefName, 'rebuilding a generated file failed', options.runUrl, pushed));
+				needsOwner(failedComment(pull.baseRefName, 'rebuilding a generated file failed', options.runUrl));
 				return;
 			}
 			files = plan.files;
@@ -257,49 +285,52 @@ function pushOne(context: Context, appGitHub: GitHubApi, pull: Pull, event: Pull
 		const signature = published.verified ? 'verified' : `not verified (${published.reason})`;
 		annotate('notice', `#${pull.number}: merged ${pull.baseRefName} in with ${published.sha}, signature ${signature}`);
 		setLabel(github, pull, config.label, false);
-		const body = pushedComment(pull.baseRefName, published.sha, classification, [...pushed, published.sha]);
+		const body = pushedComment(pull.baseRefName, published.sha, classification);
 		upsertComment(github, pull.number, comment, body);
 	} finally {
 		removeWorktree(options.repo, result.dir);
 	}
 }
 
+interface CommitInfo {
+	committer: { login: string } | null;
+	commit: { verification: { verified: boolean } };
+}
+
+/**
+ * Whether the App made `sha`: GitHub verified its signature and its committer is the App's bot.
+ * GitHub only signs an API commit for the identity that made it, and nobody else can make one as the
+ * App, while a commit's author and committer emails can say anything. A comment by the workflow's
+ * token can't be the record either, since any workflow in the repository can post as that bot.
+ */
+function isOwnCommit(github: GitHubApi, login: string, sha: string): boolean {
+	const info = github.api<CommitInfo>('GET', `commits/${sha}`);
+	return info.commit.verification.verified && info.committer?.login === login;
+}
+
 function pushMode(context: Context): void {
 	const { options, config } = context;
-	const { github, appGitHub } = options;
-	if (!appGitHub) throw new Error('push mode needs app-token');
-	for (const pick of context.picks) {
+	const { github, app } = options;
+	if (!app) throw new Error('push mode needs app-token and app-slug');
+	eachPick(context.picks, 'push', (pick, event) => {
 		const { pull } = pick;
-		const event = pullEvent('push', pull);
-		try {
-			if (pick.action === 'merge') pushOne(context, appGitHub, pull, event);
-			else {
-				event.set({ skipped: pick.reason });
-				if (pull.isCrossRepository) {
-					const comment = ownComment(context, pull.number);
-					const body = failedComment(pull.baseRefName, pick.reason, options.runUrl, parsePushed(comment?.body ?? ''));
-					setLabel(github, pull, config.label, true);
-					upsertComment(github, pull.number, comment, body);
-				}
-			}
-		} catch (error) {
-			event.error(error as Error);
-			throw error;
-		} finally {
-			event.emit();
-		}
-	}
+		if (pick.action === 'merge') return pushOne(context, app.github, pull, event);
+		event.set({ skipped: pick.reason });
+		if (!pull.isCrossRepository) return;
+		const comment = ownComment(context, pull.number);
+		setLabel(github, pull, config.label, true);
+		upsertComment(github, pull.number, comment, failedComment(pull.baseRefName, pick.reason, options.runUrl));
+	});
 
 	// A pull request its owner resolved since loses the label.
 	for (const pull of context.pulls) {
 		if (!pull.labels.includes(config.label) || pull.mergeStateStatus === 'DIRTY') continue;
 		const comment = ownComment(context, pull.number);
 		setLabel(github, pull, config.label, false);
-		if (comment) upsertComment(github, pull.number, comment, clearedComment(parsePushed(comment.body)));
+		if (comment) upsertComment(github, pull.number, comment, clearedComment());
 	}
 
-	const pushedOn = (pull: Pull) => parsePushed(ownComment(context, pull.number)?.body ?? '');
-	const entries = digest(github.pulls(), config.approvers, pushedOn);
+	const entries = digest(github.pulls(), config.approvers, (sha) => isOwnCommit(github, app.login, sha));
 	const markdown = renderDigest(entries);
 	mkdirSync(options.digest, { recursive: true });
 	writeFileSync(join(options.digest, 'digest.md'), markdown);
@@ -307,9 +338,9 @@ function pushMode(context: Context): void {
 	if (options.summary) appendFileSync(options.summary, `## Re-approve\n\n${markdown}`);
 }
 
-export function run(mode: 'merge' | 'push', options: Options): void {
+const modes: Record<Mode, (context: Context) => void> = { list: listMode, merge: mergeMode, push: pushMode };
+
+export function run(mode: Mode, options: Options): void {
 	mkdirSync(options.scratch, { recursive: true });
-	const context = setup(options);
-	if (mode === 'merge') mergeMode(context);
-	else pushMode(context);
+	modes[mode](setup(options));
 }

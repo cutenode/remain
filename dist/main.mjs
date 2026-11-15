@@ -2982,18 +2982,7 @@ function planFile(dir, path) {
 // src/report.ts
 /** Starts the one comment the bot keeps on a pull request, so later runs edit it in place. */
 const MARKER = "<!-- remain -->";
-/**
-* The commits the bot made on a pull request, kept in its comment. Only the bot's token can edit
-* that comment, unlike a commit's author name, which anyone can set, so the digest trusts this list.
-*/
-const PUSHED = /<!-- remain:pushed ([0-9a-f ]*) -->/;
-function parsePushed(body) {
-	return (PUSHED.exec(body)?.[1] ?? "").split(" ").filter((sha) => sha !== "");
-}
-function finish(lines, pushed) {
-	const body = lines.join("\n").trimEnd();
-	return pushed.length > 0 ? `${body}\n<!-- remain:pushed ${pushed.join(" ")} -->` : body;
-}
+const finish = (lines) => lines.join("\n").trimEnd();
 const code = (path) => `\`${path}\``;
 function resolvedLines(classification) {
 	return [
@@ -3002,7 +2991,7 @@ function resolvedLines(classification) {
 		...classification.regen.flatMap((group) => group.paths.map((path) => `- ${code(path)}: rebuilt with ${code(group.rule.regen ?? "")}`))
 	];
 }
-function ownerComment(base, classification, pushed) {
+function ownerComment(base, classification) {
 	const groups = classification.owner.flatMap((group) => [
 		`**${group.cause}**`,
 		...group.paths.map((path) => `- ${code(path)}`),
@@ -3019,21 +3008,21 @@ function ownerComment(base, classification, pushed) {
 			"",
 			...resolved
 		] : []
-	], pushed);
+	]);
 }
-function failedComment(base, error, runUrl, pushed) {
-	return finish([MARKER, `\`${base}\` can't be merged in automatically: ${error}. [Run](${runUrl})`], pushed);
+function failedComment(base, error, runUrl) {
+	return finish([MARKER, `\`${base}\` can't be merged in automatically: ${error}. [Run](${runUrl})`]);
 }
-function pushedComment(base, sha, classification, pushed) {
+function pushedComment(base, sha, classification) {
 	return finish([
 		MARKER,
 		`Merged \`${base}\` in with ${sha.slice(0, 9)}:`,
 		"",
 		...resolvedLines(classification)
-	], pushed);
+	]);
 }
-function clearedComment(pushed) {
-	return finish([MARKER, "No conflicts left."], pushed);
+function clearedComment() {
+	return finish([MARKER, "No conflicts left."]);
 }
 function ciState(pull) {
 	if (pull.ci === "SUCCESS") return "passing";
@@ -3056,16 +3045,15 @@ function sinceApproval(pull, approvers) {
 }
 /**
 * Pull requests where everything since an approver's last approval is the bot's own merges, so
-* re-approving them is all they need. One with anyone else's commits since, or whose approved
-* commit is gone, isn't listed: it needs a full review.
+* re-approving them is all they need. `isOwn` decides which commits are the bot's. One with anyone
+* else's commits since, or whose approved commit is gone, isn't listed: it needs a full review.
 */
-function digest(pulls, approvers, pushedOn) {
+function digest(pulls, approvers, isOwn) {
 	const entries = [];
 	for (const pull of pulls) {
 		const range = sinceApproval(pull, approvers);
 		if (!range || range.since.length === 0) continue;
-		const pushed = new Set(pushedOn(pull));
-		if (!range.since.every((sha) => pushed.has(sha))) continue;
+		if (!range.since.every(isOwn)) continue;
 		const repoUrl = pull.url.replace(/\/pull\/\d+$/, "");
 		entries.push({
 			number: pull.number,
@@ -3306,7 +3294,12 @@ function prepared(context, pull) {
 	], { ok: [0, 1] }).code === 0) return `it already has ${pull.baseRefName}`;
 	return prepare(repo, join(scratch, String(pull.number)), head, base, context.attrTree, context.config);
 }
-function mergeOne(context, pick, event) {
+/**
+* Merges one pull request's base in and, when every conflict is mechanical and some file needs
+* rebuilding, returns its number. With `rebuild` it also runs the regen commands and writes the plan
+* the push job reads.
+*/
+function mergeOne(context, pick, event, rebuild) {
 	const { options } = context;
 	const { pull } = pick;
 	const result = pick.action === "skip" ? pick.reason : prepared(context, pull);
@@ -3318,6 +3311,7 @@ function mergeOne(context, pick, event) {
 		const { classification } = result;
 		event.set(classificationFields(classification));
 		if (!isMechanical(classification) || classification.regen.length === 0) return void 0;
+		if (!rebuild) return pull.number;
 		const base = gitOut(result.dir, ["rev-parse", "MERGE_HEAD"]);
 		const plan = {
 			number: pull.number,
@@ -3350,23 +3344,37 @@ function mergeOne(context, pick, event) {
 		removeWorktree(options.repo, result.dir);
 	}
 }
-function mergeMode(context) {
-	const { options } = context;
-	mkdirSync(options.plans, { recursive: true });
-	const planned = [];
-	for (const pick of context.picks) {
-		const event = pullEvent("merge", pick.pull);
+/** Runs `each` on the picks, with one wide event per pull request. */
+function eachPick(picks, mode, each) {
+	return picks.map((pick) => {
+		const event = pullEvent(mode, pick.pull);
 		try {
-			const number = mergeOne(context, pick, event);
-			if (number !== void 0) planned.push(number);
+			return each(pick, event);
 		} catch (error) {
 			event.error(error);
 			throw error;
 		} finally {
 			event.emit();
 		}
-	}
-	writeFileSync(join(options.plans, "index.json"), JSON.stringify(planned));
+	});
+}
+/**
+* The pull requests with files to rebuild, for the caller's matrix of merge jobs. Listing runs no
+* repository code: git merges with hooks off and no drivers but union.
+*/
+function listMode(context) {
+	const pulls = eachPick(context.picks, "list", (pick, event) => mergeOne(context, pick, event, false)).filter((number) => number !== void 0);
+	if (context.options.output) appendFileSync(context.options.output, `pulls=${JSON.stringify(pulls)}\n`);
+}
+/**
+* Rebuilds one pull request's files. Each runs in its own job, so one pull request's regen command,
+* which is its own code, can't touch the files rebuilt for another.
+*/
+function mergeMode(context) {
+	const { options } = context;
+	if (options.pull === void 0) throw new Error("merge mode needs pull");
+	mkdirSync(options.plans, { recursive: true });
+	eachPick(context.picks.filter((pick) => pick.pull.number === options.pull), "merge", (pick, event) => mergeOne(context, pick, event, true));
 }
 /** The bot's own comment on a pull request, found by its marker and author. */
 function ownComment(context, number) {
@@ -3396,7 +3404,6 @@ function pushOne(context, appGitHub, pull, event) {
 	const { options, config } = context;
 	const { github } = options;
 	const comment = ownComment(context, pull.number);
-	const pushed = parsePushed(comment?.body ?? "");
 	const needsOwner = (body) => {
 		event.set({ outcome: "needs owner" });
 		setLabel(github, pull, config.label, true);
@@ -3411,7 +3418,7 @@ function pushOne(context, appGitHub, pull, event) {
 		const { classification } = result;
 		event.set(classificationFields(classification));
 		if (!isMechanical(classification)) {
-			needsOwner(ownerComment(pull.baseRefName, classification, pushed));
+			needsOwner(ownerComment(pull.baseRefName, classification));
 			return;
 		}
 		const base = gitOut(result.dir, ["rev-parse", "MERGE_HEAD"]);
@@ -3423,7 +3430,7 @@ function pushOne(context, appGitHub, pull, event) {
 				return;
 			}
 			if (!plan.ok) {
-				needsOwner(failedComment(pull.baseRefName, "rebuilding a generated file failed", options.runUrl, pushed));
+				needsOwner(failedComment(pull.baseRefName, "rebuilding a generated file failed", options.runUrl));
 				return;
 			}
 			files = plan.files;
@@ -3443,56 +3450,56 @@ function pushOne(context, appGitHub, pull, event) {
 		const signature = published.verified ? "verified" : `not verified (${published.reason})`;
 		annotate("notice", `#${pull.number}: merged ${pull.baseRefName} in with ${published.sha}, signature ${signature}`);
 		setLabel(github, pull, config.label, false);
-		const body = pushedComment(pull.baseRefName, published.sha, classification, [...pushed, published.sha]);
+		const body = pushedComment(pull.baseRefName, published.sha, classification);
 		upsertComment(github, pull.number, comment, body);
 	} finally {
 		removeWorktree(options.repo, result.dir);
 	}
 }
+/**
+* Whether the App made `sha`: GitHub verified its signature and its committer is the App's bot.
+* GitHub only signs an API commit for the identity that made it, and nobody else can make one as the
+* App, while a commit's author and committer emails can say anything. A comment by the workflow's
+* token can't be the record either, since any workflow in the repository can post as that bot.
+*/
+function isOwnCommit(github, login, sha) {
+	const info = github.api("GET", `commits/${sha}`);
+	return info.commit.verification.verified && info.committer?.login === login;
+}
 function pushMode(context) {
 	const { options, config } = context;
-	const { github, appGitHub } = options;
-	if (!appGitHub) throw new Error("push mode needs app-token");
-	for (const pick of context.picks) {
+	const { github, app } = options;
+	if (!app) throw new Error("push mode needs app-token and app-slug");
+	eachPick(context.picks, "push", (pick, event) => {
 		const { pull } = pick;
-		const event = pullEvent("push", pull);
-		try {
-			if (pick.action === "merge") pushOne(context, appGitHub, pull, event);
-			else {
-				event.set({ skipped: pick.reason });
-				if (pull.isCrossRepository) {
-					const comment = ownComment(context, pull.number);
-					const body = failedComment(pull.baseRefName, pick.reason, options.runUrl, parsePushed(comment?.body ?? ""));
-					setLabel(github, pull, config.label, true);
-					upsertComment(github, pull.number, comment, body);
-				}
-			}
-		} catch (error) {
-			event.error(error);
-			throw error;
-		} finally {
-			event.emit();
-		}
-	}
+		if (pick.action === "merge") return pushOne(context, app.github, pull, event);
+		event.set({ skipped: pick.reason });
+		if (!pull.isCrossRepository) return;
+		const comment = ownComment(context, pull.number);
+		setLabel(github, pull, config.label, true);
+		upsertComment(github, pull.number, comment, failedComment(pull.baseRefName, pick.reason, options.runUrl));
+	});
 	for (const pull of context.pulls) {
 		if (!pull.labels.includes(config.label) || pull.mergeStateStatus === "DIRTY") continue;
 		const comment = ownComment(context, pull.number);
 		setLabel(github, pull, config.label, false);
-		if (comment) upsertComment(github, pull.number, comment, clearedComment(parsePushed(comment.body)));
+		if (comment) upsertComment(github, pull.number, comment, clearedComment());
 	}
-	const pushedOn = (pull) => parsePushed(ownComment(context, pull.number)?.body ?? "");
-	const entries = digest(github.pulls(), config.approvers, pushedOn);
+	const entries = digest(github.pulls(), config.approvers, (sha) => isOwnCommit(github, app.login, sha));
 	const markdown = renderDigest(entries);
 	mkdirSync(options.digest, { recursive: true });
 	writeFileSync(join(options.digest, "digest.md"), markdown);
 	writeFileSync(join(options.digest, "digest.json"), `${JSON.stringify(entries, null, "	")}\n`);
 	if (options.summary) appendFileSync(options.summary, `## Re-approve\n\n${markdown}`);
 }
+const modes = {
+	list: listMode,
+	merge: mergeMode,
+	push: pushMode
+};
 function run(mode, options) {
 	mkdirSync(options.scratch, { recursive: true });
-	const context = setup(options);
-	if (mode === "merge") mergeMode(context);
-	else pushMode(context);
+	modes[mode](setup(options));
 }
 
 // src/main.ts
@@ -3500,21 +3507,32 @@ initLogger({
 	env: { service: "remain" },
 	pretty: false
 });
+const isMode = (value) => [
+	"list",
+	"merge",
+	"push"
+].includes(value);
 function input(name, fallback = "") {
 	return process.env[`INPUT_${name.toUpperCase()}`]?.trim() || fallback;
 }
 try {
 	const mode = input("mode");
-	if (mode !== "merge" && mode !== "push") throw new Error(`mode must be merge or push, not "${mode}"`);
+	if (!isMode(mode)) throw new Error(`mode must be list, merge or push, not "${mode}"`);
 	const repo = process.env.GITHUB_REPOSITORY ?? "";
 	const server = process.env.GITHUB_SERVER_URL ?? "https://github.com";
 	const token = input("token");
 	const appToken = input("app-token");
+	const appSlug = input("app-slug");
 	const summary = process.env.GITHUB_STEP_SUMMARY;
+	const output = process.env.GITHUB_OUTPUT;
+	const pull = input("pull");
 	run(mode, {
 		repo: resolve(process.env.GITHUB_WORKSPACE ?? "."),
 		github: new GitHub(repo, token),
-		...appToken ? { appGitHub: new GitHub(repo, appToken) } : {},
+		...appToken && appSlug ? { app: {
+			github: new GitHub(repo, appToken),
+			login: `${appSlug}[bot]`
+		} } : {},
 		...input("base") ? { base: input("base") } : {},
 		token,
 		server,
@@ -3524,7 +3542,9 @@ try {
 		digest: resolve(input("digest", "remain-digest")),
 		commentAuthor: input("comment-author", "github-actions[bot]"),
 		runUrl: `${server}/${repo}/actions/runs/${process.env.GITHUB_RUN_ID}`,
-		...summary ? { summary } : {}
+		...summary ? { summary } : {},
+		...output ? { output } : {},
+		...pull ? { pull: Number(pull) } : {}
 	});
 } catch (error) {
 	console.log(`::error::${error.message}`);

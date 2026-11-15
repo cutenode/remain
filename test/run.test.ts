@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { git, gitOut } from '../src/git.ts';
@@ -79,16 +79,27 @@ function setUp(regen: string): void {
 		pull(4, { ...ref('branch-4'), mergeStateStatus: 'CLEAN', labels: ['needs-owner'] }),
 		pull(5, { headRefName: 'patch-1', isCrossRepository: true }),
 	];
-	github.comments.set(4, [
-		{ id: 99, body: `${MARKER}\nold\n<!-- remain:pushed abc -->`, user: { login: 'github-actions[bot]' } },
-	]);
+	github.comments.set(4, [{ id: 99, body: `${MARKER}\nold`, user: { login: 'github-actions[bot]' } }]);
+}
+
+/**
+ * What the caller workflow does before the push job: list the pull requests with files to rebuild,
+ * then one merge job each. Returns the list.
+ */
+const outputs = { next: 1 };
+function listAndMerge(opts: Options): number[] {
+	const output = join(scratch, `output-${outputs.next++}`);
+	run('list', { ...opts, output });
+	const pulls = JSON.parse(/^pulls=(.*)$/m.exec(readFileSync(output, 'utf8'))?.[1] ?? '') as number[];
+	for (const number of pulls) run('merge', { ...opts, pull: number });
+	return pulls;
 }
 
 function options(): Options {
 	return {
 		repo: join(scratch, 'checkout'),
 		github,
-		appGitHub: github.as('remain[bot]'),
+		app: { github: github.as('remain[bot]'), login: 'remain[bot]' },
 		token: 'token',
 		server: 'https://github.com',
 		scratch: join(scratch, 'runner'),
@@ -111,12 +122,12 @@ describe('run', () => {
 	beforeEach(() => setUp('ls items | sort > items.index'));
 
 	it('merges the default branch into a pull request whose conflicts are all mechanical', () => {
-		run('merge', options());
+		github.signing.on = true;
+		assert.deepEqual(listAndMerge(options()), [1]);
 		assert.deepEqual(
 			['1.json', '2.json'].map((file) => existsSync(join(scratch, 'plans', file))),
 			[true, false],
 		);
-		assert.equal(readFileSync(join(scratch, 'plans', 'index.json'), 'utf8'), '[1]');
 		run('push', options());
 
 		const pushed = gitOut(github.remote, ['rev-parse', 'refs/heads/branch-1']);
@@ -134,7 +145,6 @@ describe('run', () => {
 				'',
 				"- `CHANGES.txt`: kept both sides' lines",
 				'- `items.index`: rebuilt with `ls items | sort > items.index`',
-				`<!-- remain:pushed ${pushed} -->`,
 			].join('\n'),
 		]);
 		assert.deepEqual(labelsOn(1), []);
@@ -147,8 +157,29 @@ describe('run', () => {
 		assert.match(readFileSync(join(scratch, 'summary.md'), 'utf8'), /^## Re-approve\n\n\| Pull request/);
 	});
 
+	it("leaves its merge out of the digest when GitHub didn't sign it", () => {
+		listAndMerge(options());
+		run('push', options());
+		assert.notEqual(gitOut(github.remote, ['rev-parse', 'refs/heads/branch-1']), heads['branch-1']);
+		assert.equal(readFileSync(join(scratch, 'digest', 'digest.json'), 'utf8'), '[]\n');
+	});
+
+	it('leaves a pull request out of the digest when someone else committed after its merge', () => {
+		github.signing.on = true;
+		listAndMerge(options());
+		run('push', options());
+		// A signed commit through the API (a web edit, say), by someone other than the App.
+		const merged = gitOut(github.remote, ['rev-parse', 'refs/heads/branch-1']);
+		const other = github.as('octocat');
+		const tree = gitOut(github.remote, ['rev-parse', `${merged}^{tree}`]);
+		const { sha } = other.api<{ sha: string }>('POST', 'git/commits', { message: 'edit', tree, parents: [merged] });
+		other.api('PATCH', 'git/refs/heads/branch-1', { sha, force: false });
+		run('push', options());
+		assert.equal(readFileSync(join(scratch, 'digest', 'digest.json'), 'utf8'), '[]\n');
+	});
+
 	it('labels the rest for their owners, and leaves stacks and clean pull requests alone', () => {
-		run('merge', options());
+		listAndMerge(options());
 		run('push', options());
 
 		assert.equal(gitOut(github.remote, ['rev-parse', 'refs/heads/branch-2']), heads['branch-2']);
@@ -160,14 +191,14 @@ describe('run', () => {
 		assert.deepEqual(commentOn(3), []);
 
 		assert.deepEqual(labelsOn(4), []);
-		assert.deepEqual(commentOn(4), [`${MARKER}\nNo conflicts left.\n<!-- remain:pushed abc -->`]);
+		assert.deepEqual(commentOn(4), [`${MARKER}\nNo conflicts left.`]);
 
 		assert.deepEqual(labelsOn(5), ['needs-owner']);
 		assert.match(commentOn(5)[0] ?? '', /its branch is on a fork/);
 	});
 
 	it('edits its comment in place on a later run', () => {
-		run('merge', options());
+		listAndMerge(options());
 		run('push', options());
 		run('push', options());
 		assert.equal(commentOn(2).length, 1);
@@ -181,7 +212,7 @@ describe('run', () => {
 	});
 
 	it('merges another base when told to, and skips a pull request that already has it', () => {
-		run('merge', { ...options(), base: 'branch-2' });
+		listAndMerge({ ...options(), base: 'branch-2' });
 		run('push', { ...options(), base: 'branch-2' });
 		assert.equal(gitOut(github.remote, ['rev-parse', 'refs/heads/branch-3']), heads['branch-3']);
 		assert.equal(gitOut(github.remote, ['rev-parse', 'refs/heads/branch-1']), heads['branch-1']);
@@ -189,7 +220,7 @@ describe('run', () => {
 	});
 
 	it("doesn't touch a pull request someone pushed to after the merge job", () => {
-		run('merge', options());
+		listAndMerge(options());
 		upstream.checkout('branch-1');
 		const moved = upstream.commit({ 'late.txt': 'late\n' });
 		git(upstream.dir, ['push', '--quiet', github.remote, 'branch-1']);
@@ -199,7 +230,7 @@ describe('run', () => {
 	});
 
 	it("doesn't comment when GitHub refuses the branch update as not a fast-forward", () => {
-		run('merge', options());
+		listAndMerge(options());
 		github.failures.set('PATCH git/refs/heads/branch-1', 422);
 		run('push', options());
 		assert.equal(gitOut(github.remote, ['rev-parse', 'refs/heads/branch-1']), heads['branch-1']);
@@ -207,7 +238,7 @@ describe('run', () => {
 	});
 
 	it('stops on a GitHub error, after logging which pull request it was on', () => {
-		run('merge', options());
+		listAndMerge(options());
 		github.failures.set('POST issues/2/labels', 500);
 		assert.throws(() => run('push', options()), /POST issues\/2\/labels failed/);
 		github.failures.clear();
@@ -217,19 +248,32 @@ describe('run', () => {
 
 	it('stops when it cannot write a plan', () => {
 		mkdirSync(join(scratch, 'plans', '1.json'), { recursive: true });
-		assert.throws(() => run('merge', options()), /EISDIR/);
+		assert.throws(() => listAndMerge(options()), /EISDIR/);
+	});
+
+	it('merges one pull request at a time, and only one GitHub still marks DIRTY', () => {
+		assert.throws(() => run('merge', options()), /merge mode needs pull/);
+		run('merge', { ...options(), pull: 4 });
+		assert.deepEqual(readdirSync(join(scratch, 'plans')), []);
+		run('merge', { ...options(), pull: 1 });
+		assert.equal(existsSync(join(scratch, 'plans', '1.json')), true);
+	});
+
+	it('lists without an output file, and writes no plan', () => {
+		run('list', options());
+		assert.equal(existsSync(join(scratch, 'plans')), false);
 	});
 
 	it('needs the App to push', () => {
-		const { appGitHub: _, ...withoutApp } = options();
-		assert.throws(() => run('push', withoutApp), /push mode needs app-token/);
+		const { app: _, ...withoutApp } = options();
+		assert.throws(() => run('push', withoutApp), /push mode needs app-token and app-slug/);
 	});
 
 	it('needs a config on the default branch', () => {
 		upstream.cleanup();
 		setUp('true');
 		assert.throws(
-			() => run('merge', { ...options(), config: '.github/missing.json' }),
+			() => listAndMerge({ ...options(), config: '.github/missing.json' }),
 			/main has no .github\/missing.json/,
 		);
 	});
@@ -239,7 +283,7 @@ describe('run, when a regenerate command fails', () => {
 	beforeEach(() => setUp('exit 1'));
 
 	it("labels the pull request and doesn't push", () => {
-		run('merge', options());
+		listAndMerge(options());
 		run('push', options());
 		assert.equal(gitOut(github.remote, ['rev-parse', 'refs/heads/branch-1']), heads['branch-1']);
 		assert.deepEqual(labelsOn(1), ['needs-owner']);

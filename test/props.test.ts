@@ -7,7 +7,7 @@ import { describe, it } from 'node:test';
 import * as fc from 'fast-check';
 import { classify, isMechanical } from '../src/classify.ts';
 import { type Config, parseConfig, ruleFor, unionAttributes } from '../src/config.ts';
-import { clearedComment, digest, parsePushed, renderDigest, sinceApproval } from '../src/report.ts';
+import { digest, renderDigest, sinceApproval } from '../src/report.ts';
 import { type Pull, select } from '../src/select.ts';
 import { pull } from './pull.ts';
 
@@ -134,14 +134,7 @@ describe('select, for any pull requests', () => {
 
 const sha = fc.stringMatching(/^[0-9a-f]{40}$/);
 
-describe('comments and the digest, for any history', () => {
-	it('carry the pushed commits through a comment', () => {
-		fc.assert(
-			fc.property(fc.array(sha), (shas) => assert.deepEqual(parsePushed(clearedComment(shas)), shas)),
-			params,
-		);
-	});
-
+describe('the digest, for any history', () => {
 	it("list a pull request only when every commit since the newest approval is the bot's", () => {
 		const history = fc.record({
 			commits: fc.uniqueArray(sha, { minLength: 1, maxLength: 6 }),
@@ -155,16 +148,16 @@ describe('comments and the digest, for any history', () => {
 					.filter((i) => i < commits.length)
 					.map((i) => ({ login: 'bnb', oid: commits[i] ?? '' }));
 				const item = pull(1, { commits, approvals, headRefOid: commits.at(-1) ?? '', title });
-				const pushed = commits.slice(botFrom);
+				const pushed = new Set(commits.slice(botFrom));
 				const range = sinceApproval(item, ['bnb']);
-				const entries = digest([item], ['bnb'], () => pushed);
+				const entries = digest([item], ['bnb'], (commit) => pushed.has(commit));
 				if (!range) {
 					assert.equal(approvals.length, 0);
 					assert.deepEqual(entries, []);
 					return;
 				}
 				assert.equal(commits.indexOf(range.approved), Math.max(...approvedAt.filter((i) => i < commits.length)));
-				const listed = range.since.length > 0 && range.since.every((commit) => pushed.includes(commit));
+				const listed = range.since.length > 0 && range.since.every((commit) => pushed.has(commit));
 				assert.equal(entries.length, listed ? 1 : 0);
 				const rows = renderDigest(entries).split('\n').slice(2).filter(Boolean);
 				for (const row of rows) assert.equal(row.split(/(?<!\\)\|/).length, 5);

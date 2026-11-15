@@ -9,7 +9,6 @@ import {
 	failedComment,
 	MARKER,
 	ownerComment,
-	parsePushed,
 	pushedComment,
 	renderDigest,
 	sinceApproval,
@@ -35,7 +34,7 @@ describe('comments', () => {
 			[],
 		);
 		assert.equal(
-			ownerComment('main', classification, []),
+			ownerComment('main', classification),
 			[
 				MARKER,
 				"`main` can't be merged in automatically. These files need you:",
@@ -54,32 +53,26 @@ describe('comments', () => {
 		);
 	});
 
-	it('says what a push resolved, and keeps the pushed commits', () => {
+	it('says what a push resolved', () => {
 		const classification = classify(config, ['CHANGES.txt', 'src/a.rs'], [], ['src/a.rs']);
-		const body = pushedComment('main', 'abcdef0123456789', classification, ['1111', 'abcdef0123456789']);
 		assert.equal(
-			body,
+			pushedComment('main', 'abcdef0123456789', classification),
 			[
 				MARKER,
 				'Merged `main` in with abcdef012:',
 				'',
 				"- `CHANGES.txt`: kept both sides' lines",
 				'- `src/a.rs`: replayed an earlier reviewed resolution',
-				'<!-- remain:pushed 1111 abcdef0123456789 -->',
 			].join('\n'),
 		);
-		assert.deepEqual(parsePushed(body), ['1111', 'abcdef0123456789']);
 	});
 
-	it('carries the pushed commits through every kind of comment', () => {
-		assert.deepEqual(parsePushed(clearedComment(['aa'])), ['aa']);
-		assert.deepEqual(parsePushed(failedComment('main', 'x', 'https://run', ['bb'])), ['bb']);
-		assert.equal(clearedComment([]), `${MARKER}\nNo conflicts left.`);
+	it('says when nothing conflicts any more, and why a merge failed', () => {
+		assert.equal(clearedComment(), `${MARKER}\nNo conflicts left.`);
 		assert.equal(
-			failedComment('dev', 'its branch is on a fork', 'https://run', []),
+			failedComment('dev', 'its branch is on a fork', 'https://run'),
 			`${MARKER}\n\`dev\` can't be merged in automatically: its branch is on a fork. [Run](https://run)`,
 		);
-		assert.deepEqual(parsePushed('no marker'), []);
 	});
 });
 
@@ -115,7 +108,8 @@ describe('sinceApproval', () => {
 	});
 });
 
-const pushed = () => ['m1', 'm2'];
+/** The bot made m1 and m2. */
+const pushed = (sha: string) => ['m1', 'm2'].includes(sha);
 
 describe('digest', () => {
 	const approvedThenPushed = pull(2, {
