@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+# The action's bundle, built from src/ by `pnpm build`. tools/lint.sh checks it's current.
+dist/** linguist-generated=true -diff

@@ -1,0 +1,15 @@
+# Install scripts run only for these versions, so a bump has to approve its script again.
+# lefthook's installs the git hooks.
+allowBuilds:
+  lefthook@2.2.2: true
+# Avoid installing packages published in the last 3 days (in minutes).
+minimumReleaseAge: 4320
+# No git or tarball URLs anywhere in the tree.
+blockExoticSubdeps: true
+# Fail if trusted publishing or provenance is gone from a package that used to have it.
+trustPolicy: no-downgrade
+# Versions whose own maintainers published them by hand after earlier releases had provenance. Each
+# is pinned, so the next release is checked again. lefthook 2.2.2 (mrexox; 2.2.1 came from GitHub
+# Actions).
+trustPolicyExclude:
+  - lefthook@2.2.2

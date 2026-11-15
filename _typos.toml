@@ -1,0 +1,11 @@
+# typos (tools/lint.sh).
+
+[files]
+# The bundle, which is evlog's text as much as ours.
+extend-exclude = ["dist/"]
+
+[default]
+extend-ignore-re = [
+	# Hashes, like commit shas.
+	'\b[0-9a-f]{16,}\b',
+]

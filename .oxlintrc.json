@@ -1,0 +1,21 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "unicorn", "oxc", "import", "node", "promise"],
+	"options": {
+		"reportUnusedDisableDirectives": "error"
+	},
+	"categories": {
+		"correctness": "error",
+		"suspicious": "error",
+		"perf": "error"
+	},
+	"env": {
+		"node": true,
+		"es2024": true
+	},
+	"rules": {
+		"typescript/no-explicit-any": "error",
+		"typescript/no-non-null-assertion": "error"
+	},
+	"ignorePatterns": [".claude/**", "coverage/**", "dist/**", "node_modules/**"]
+}

@@ -1,0 +1,7 @@
+{
+	"$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+	// src/main.ts is the action's entry (action.yml runs its bundle), and the tests run with
+	// `node --test`, which knip doesn't see.
+	"entry": ["src/main.ts", "test/**/*.test.ts"],
+	"project": ["src/**/*.ts", "test/**/*.ts"],
+}

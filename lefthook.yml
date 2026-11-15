@@ -1,0 +1,28 @@
+# Git hooks, installed by `pnpm install`. Pre-push runs what CI runs, so CI isn't the first test.
+pre-commit:
+  parallel: true
+  jobs:
+    - name: format
+      glob: '*.{ts,js,json,jsonc,toml}'
+      run: pnpm exec oxfmt --no-error-on-unmatched-pattern {staged_files}
+      stage_fixed: true
+    - name: lint
+      glob: '*.{ts,js}'
+      run: pnpm exec oxlint {staged_files}
+    # action.yml runs dist/, so a commit that changes src/ carries the bundle it builds.
+    - name: bundle
+      glob: 'src/**/*.ts'
+      run: node --run build >/dev/null && git add dist
+
+commit-msg:
+  jobs:
+    - name: commitlint
+      run: pnpm exec commitlint --edit {1}
+
+pre-push:
+  parallel: true
+  jobs:
+    - name: lint
+      run: tools/lint.sh
+    - name: coverage
+      run: node --run coverage

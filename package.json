@@ -1,0 +1,31 @@
+{
+	"name": "remain",
+	"version": "0.0.0",
+	"private": true,
+	"description": "Merges main into conflicting pull requests when the conflicts are mechanical",
+	"license": "MIT",
+	"type": "module",
+	"scripts": {
+		"lint": "tools/lint.sh",
+		"format": "oxfmt",
+		"test": "node --test 'test/**/*.test.ts'",
+		"coverage": "node --test --experimental-test-coverage --test-coverage-include='src/**' --test-coverage-exclude=src/main.ts --test-coverage-exclude=src/github.ts --test-coverage-lines=100 --test-coverage-branches=95 --test-coverage-functions=100 'test/**/*.test.ts'",
+		"build": "rolldown src/main.ts --file dist/main.mjs --platform node --format esm --minify false"
+	},
+	"dependencies": {
+		"evlog": "2.35.1"
+	},
+	"devDependencies": {
+		"@commitlint/cli": "^21.2.4",
+		"@commitlint/config-conventional": "^21.2.4",
+		"@types/node": "^24.19.2",
+		"fast-check": "^4.10.2",
+		"knip": "^6.45.1",
+		"lefthook": "^2.2.2",
+		"oxfmt": "^0.78.0",
+		"oxlint": "^1.93.0",
+		"rolldown": "^1.3.2",
+		"typescript": "^7.0.2"
+	},
+	"packageManager": "pnpm@12.6.0"
+}

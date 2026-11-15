@@ -1,0 +1,73 @@
+name: Release
+
+# uppt (https://github.com/danielroe/uppt) runs releases, as in docov. Each push to main opens or
+# updates a draft release PR from the conventional commits since the last tag, bumping
+# package.json. Merging it tags the commit and cuts a GitHub release. There's nothing to publish:
+# callers use the action from the repository at a commit SHA.
+on:
+  push:
+    # release/v* picks up hand edits to an open release PR
+    branches: [main, 'release/v*']
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Cut a prerelease instead of a normal release, e.g. `beta`, `rc`, or `0`
+        required: false
+        default: ''
+
+permissions: {}
+
+# Back-to-back pushes to main would otherwise race on the release PR's branch. Runs for the same
+# event and ref wait their turn, the newest replacing any still waiting.
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # open or update a draft release PR from conventional commits
+  pr:
+    if: |
+      !github.event.repository.fork
+      && (
+        (
+          github.event_name == 'push'
+          && (
+            github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+            || startsWith(github.ref, 'refs/heads/release/v')
+          )
+        ) || github.event_name == 'workflow_dispatch'
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: danielroe/uppt/pr@6c1a9b480b0f02a3f535dedaf1a113f590aa56f2 # v0.6.12
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: ${{ inputs.prerelease }}
+          title: 'chore(release): v{version}'
+
+  # release PR merged: tag it and cut a GitHub release
+  release:
+    if: |
+      github.event_name == 'pull_request'
+      && github.event.pull_request.merged == true
+      && startsWith(github.event.pull_request.head.ref, 'release/v')
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && !github.event.repository.fork
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: danielroe/uppt/release@6c1a9b480b0f02a3f535dedaf1a113f590aa56f2 # v0.6.12
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

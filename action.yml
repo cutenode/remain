@@ -1,0 +1,36 @@
+name: remain
+description: Merges the base branch into conflicting pull requests when every conflict is mechanical
+author: cutenode
+branding:
+  icon: git-merge
+  color: purple
+
+inputs:
+  mode:
+    description: '`merge` (no secrets: merges and runs the regenerate commands) or `push` (with the App token: checks and pushes)'
+    required: true
+  token:
+    description: 'Reads pull requests; in push mode also labels and comments (pull-requests write)'
+    default: ${{ github.token }}
+  app-token:
+    description: 'Push mode: a GitHub App installation token with contents and workflows write, so the push runs CI'
+    default: ''
+  base:
+    description: 'The branch merged into the pull requests based on it, and where the config is read [default: the default branch]'
+    default: ''
+  config:
+    description: 'The config file, read from the base branch'
+    default: .github/remain.json
+  plans:
+    description: 'Where merge mode writes the rebuilt files and push mode reads them'
+    default: remain-plans
+  digest:
+    description: 'Push mode: where to write digest.md and digest.json, the pull requests to re-approve'
+    default: remain-digest
+  comment-author:
+    description: 'The login `token` comments as'
+    default: github-actions[bot]
+
+runs:
+  using: node24
+  main: dist/main.mjs
