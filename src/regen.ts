@@ -1,7 +1,7 @@
 import { existsSync, lstatSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Rule, matches } from './config.ts';
-import { git, gitOut, readObject, shell, splitZ } from './git.ts';
+import { git, gitEnv, gitOut, readObject, shell, splitZ } from './git.ts';
 
 /** A rebuilt file as the push job takes it: its new bytes and mode, or null when it's gone. */
 export interface PlanFile {
@@ -46,7 +46,7 @@ export function regenerate(
 		if (readObject(dir, `${base}:${path}`) === undefined) git(dir, ['rm', '--quiet', '--force', '--', path]);
 		else git(dir, ['checkout', base, '--', path]);
 	}
-	const env = commandEnv(process.env);
+	const env = commandEnv(gitEnv());
 	const written = new Set<string>();
 	for (const pass of [1, 2]) {
 		const result = shell(rule.regen, dir, env);

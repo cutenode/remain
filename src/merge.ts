@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type Classification, classify, rerereResolved } from './classify.ts';
 import { type Config, unionAttributes } from './config.ts';
-import { EMPTY_TREE, git, gitOut, lines, readObject, splitZ } from './git.ts';
+import { EMPTY_TREE, git, gitEnv, gitOut, lines, readObject, splitZ } from './git.ts';
 
 /**
  * A tree holding the default branch's files with the union lines added to its root .gitattributes.
@@ -14,13 +14,14 @@ export function attributesTree(repo: string, defaultRev: string, config: Config)
 	const own = readObject(repo, `${defaultRev}:.gitattributes`)?.toString('utf8') ?? '';
 	const text = `${own}${own === '' || own.endsWith('\n') ? '' : '\n'}${unionAttributes(config)}`;
 	const blob = gitOut(repo, ['hash-object', '-w', '--stdin'], { input: text });
-	const env = { ...process.env, GIT_INDEX_FILE: join(tmpdir(), `remain-index-${process.pid}`) };
+	const index = join(tmpdir(), `remain-index-${process.pid}`);
+	const env = gitEnv({ GIT_INDEX_FILE: index });
 	try {
 		git(repo, ['read-tree', defaultRev], { env });
 		git(repo, ['update-index', '--add', '--cacheinfo', `100644,${blob},.gitattributes`], { env });
 		return gitOut(repo, ['write-tree'], { env });
 	} finally {
-		rmSync(env.GIT_INDEX_FILE, { force: true });
+		rmSync(index, { force: true });
 	}
 }
 

@@ -2559,11 +2559,35 @@ function rerereResolved(output) {
 // src/git.ts
 /** The empty tree's hash. As attr.tree it makes git read no .gitattributes at all. */
 const EMPTY_TREE = "4b825dc642cb6eb9a060af63bece73b5b6c2b4b9";
+/**
+* Variables that point git at a repository. Git exports some of them to hooks, so when a hook runs
+* remain or its tests, every git call would otherwise go to the hook's repository instead of the
+* one in `cwd`.
+*/
+const REPOSITORY_VARIABLES = /* @__PURE__ */ new Set([
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+	"GIT_COMMON_DIR",
+	"GIT_PREFIX",
+	"GIT_NAMESPACE",
+	"GIT_QUARANTINE_PATH"
+]);
+/** This process's environment without the repository variables, plus `extra`, which may set them. */
+function gitEnv(extra = {}) {
+	const inherited = Object.entries(process.env).filter(([key]) => !REPOSITORY_VARIABLES.has(key));
+	return {
+		...Object.fromEntries(inherited),
+		...extra
+	};
+}
 function run$1(command, args, cwd, options) {
 	const result = spawnSync(command, args, {
 		cwd,
 		input: options.input,
-		env: options.env ?? process.env,
+		env: options.env ?? gitEnv(),
 		encoding: "utf8",
 		maxBuffer: 1 << 30
 	});
@@ -2600,6 +2624,7 @@ function readObject(cwd, spec) {
 		spec
 	], {
 		cwd,
+		env: gitEnv(),
 		maxBuffer: 1 << 30
 	});
 	if (result.error) throw result.error;
@@ -2667,10 +2692,8 @@ function attributesTree(repo, defaultRev, config) {
 		"-w",
 		"--stdin"
 	], { input: text });
-	const env = {
-		...process.env,
-		GIT_INDEX_FILE: join(tmpdir(), `remain-index-${process.pid}`)
-	};
+	const index = join(tmpdir(), `remain-index-${process.pid}`);
+	const env = gitEnv({ GIT_INDEX_FILE: index });
 	try {
 		git(repo, ["read-tree", defaultRev], { env });
 		git(repo, [
@@ -2681,7 +2704,7 @@ function attributesTree(repo, defaultRev, config) {
 		], { env });
 		return gitOut(repo, ["write-tree"], { env });
 	} finally {
-		rmSync(env.GIT_INDEX_FILE, { force: true });
+		rmSync(index, { force: true });
 	}
 }
 /** The settings every merge the bot makes or learns from runs with. */
@@ -2933,7 +2956,7 @@ function regenerate(dir, rule, conflicts, base) {
 		"--",
 		path
 	]);
-	const env = commandEnv(process.env);
+	const env = commandEnv(gitEnv());
 	const written = /* @__PURE__ */ new Set();
 	for (const pass of [1, 2]) {
 		const result = shell(rule.regen, dir, env);

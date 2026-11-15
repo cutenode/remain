@@ -1,7 +1,7 @@
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { type GitHubApi, GitHubError } from '../src/github.ts';
-import { git, gitOut, lines } from '../src/git.ts';
+import { git, gitEnv, gitOut, lines } from '../src/git.ts';
 import type { Pull } from '../src/select.ts';
 import { tempDir } from './repo.ts';
 
@@ -78,7 +78,7 @@ export class FakeGitHub implements GitHubApi {
 		if (method === 'POST' && path === 'git/trees') {
 			const { base_tree, tree } = body as TreeBody;
 			const scratch = tempDir();
-			const env = { ...process.env, GIT_INDEX_FILE: join(scratch, 'index'), GIT_WORK_TREE: scratch };
+			const env = gitEnv({ GIT_INDEX_FILE: join(scratch, 'index'), GIT_WORK_TREE: scratch });
 			try {
 				git(remote, ['read-tree', base_tree], { env });
 				for (const entry of tree) {
