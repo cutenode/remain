@@ -72,108 +72,33 @@ concurrency:
   group: remain
 
 jobs:
-  # The pull requests whose merge needs files rebuilt. Runs none of the repository's code.
-  list:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      pulls: ${{ steps.remain.outputs.pulls }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/rr-cache
-          key: remain-rerere-${{ github.run_id }}
-          restore-keys: remain-rerere-
-      - id: remain
-        uses: cutenode/remain@<commit sha>
-        with:
-          mode: list
-
-  # Rebuilds one pull request's files with its regen commands, which run its code. One job each, so
-  # one pull request's code can't touch another's files. No secrets here.
-  merge:
-    needs: list
-    if: needs.list.outputs.pulls != '[]'
-    strategy:
-      fail-fast: false
-      matrix:
-        pull: ${{ fromJSON(needs.list.outputs.pulls) }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      pull-requests: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      # Install whatever the regen commands need here.
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/rr-cache
-          key: remain-rerere-${{ github.run_id }}
-          restore-keys: remain-rerere-
-      - uses: cutenode/remain@<commit sha>
-        with:
-          mode: merge
-          pull: ${{ matrix.pull }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: remain-plans-${{ matrix.pull }}
-          path: remain-plans
-          retention-days: 1
-
-  # Checks the merge jobs' work without running any of the repository's code, then pushes. It
-  # restores no cache: the merge jobs could have written one, so it learns its resolutions itself.
-  push:
-    needs: [list, merge]
-    if: ${{ !cancelled() && needs.list.result == 'success' }}
-    runs-on: ubuntu-latest
-    environment: remain
+  remain:
+    uses: cutenode/remain/.github/workflows/remain.yml@<commit sha>
     permissions:
       contents: read
       pull-requests: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - if: needs.list.outputs.pulls != '[]'
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: remain-plans-*
-          path: remain-plans
-          merge-multiple: true
-      - id: app
-        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
-        with:
-          client-id: ${{ vars.REMAIN_CLIENT_ID }}
-          private-key: ${{ secrets.REMAIN_PRIVATE_KEY }}
-          permission-contents: write
-          permission-workflows: write
-      - uses: cutenode/remain@<commit sha>
-        with:
-          mode: push
-          app-token: ${{ steps.app.outputs.token }}
-          app-slug: ${{ steps.app.outputs.app-slug }}
-      # What it learned, for the next run's list and merge jobs.
-      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/rr-cache
-          key: remain-rerere-push-${{ github.run_id }}
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: remain-digest
-          path: remain-digest
+    # GitHub only hands a reusable workflow the secrets its caller passes, environment ones too.
+    secrets:
+      REMAIN_PRIVATE_KEY: ${{ secrets.REMAIN_PRIVATE_KEY }}
+    with:
+      rust: true
 ```
 
-The schedule moves stacks along: a pull request based on another one's branch waits while its parent conflicts, so a stack is worked from the bottom up, one level per run. A push to a pull request's branch doesn't start this workflow.
+[`.github/workflows/remain.yml`](.github/workflows/remain.yml) runs three jobs. `list` names the conflicting pull requests whose merge needs files rebuilt. `merge` rebuilds them, one job per pull request. `push` checks that work and pushes. Each job runs the action from the workflow's own commit, so the two can't drift apart. Its inputs:
+
+| Input           | Default               | What it does                                                                                            |
+| --------------- | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `rust`          | `false`               | Installs the toolchain `rust-toolchain.toml` names in the merge jobs, for regen commands that run cargo |
+| `node`          | `false`               | Installs the Node `.node-version` names in the merge jobs                                               |
+| `pnpm`          | `false`               | Installs pnpm (from `packageManager`) and Node in the merge jobs                                        |
+| `setup`         |                       | A shell command the merge jobs run before the regen commands                                            |
+| `merge-timeout` | `30`                  | Minutes each merge job may take                                                                         |
+| `base`          | the default branch    | The branch merged into the pull requests based on it                                                    |
+| `config`        | `.github/remain.json` | The config file, read from the base branch                                                              |
+
+The schedule moves stacks along: a pull request based on another one's branch waits while its parent conflicts, so a stack is worked from the bottom up, one level per run.
+
+To run the jobs some other way, use the action directly: [`action.yml`](action.yml) has the `list`, `merge` and `push` modes the workflow calls.
 
 ### The digest
 
