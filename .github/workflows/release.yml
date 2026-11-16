@@ -4,6 +4,9 @@ name: Release
 # updates a draft release PR from the conventional commits since the last tag, bumping
 # package.json. Merging it tags the commit and cuts a GitHub release. There's nothing to publish:
 # callers use the action from the repository at a commit SHA.
+#
+# The release PR is opened with a GitHub App's token (vars.CI_APP_CLIENT_ID and
+# secrets.CI_APP_PRIVATE_KEY), since this repository doesn't let Actions create pull requests.
 on:
   push:
     # release/v* picks up hand edits to an open release PR
@@ -42,13 +45,18 @@ jobs:
       )
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-      pull-requests: write
+    permissions: {} # uppt/pr does everything with the app token below
     steps:
+      - id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.CI_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+          permission-contents: write # push the release/vX.Y.Z branch and delete superseded ones
+          permission-pull-requests: write # open and update the release PR, close superseded ones
       - uses: danielroe/uppt/pr@6c1a9b480b0f02a3f535dedaf1a113f590aa56f2 # v0.6.12
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app-token.outputs.token }}
           prerelease: ${{ inputs.prerelease }}
           title: 'chore(release): v{version}'
 
