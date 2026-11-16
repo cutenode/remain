@@ -4,6 +4,9 @@
 # there a missing one fails instead of being skipped.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Git exports these to the hooks that run this script. Unset, every git call below works on the
+# repository its directory is in, including the scratch one the caller check makes.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_PREFIX
 PATH=$PWD/node_modules/.bin:$PATH
 
 # Whether linter $1 is installed, failing when it isn't and REQUIRE_LINTERS is true.
@@ -46,4 +49,20 @@ if have zizmor; then
 fi
 if have actionlint; then
 	actionlint
+	# The README's caller workflow, checked by actionlint against .github/workflows/remain.yml, so
+	# its inputs and permissions stay right. actionlint only reads a local reusable workflow.
+	caller=$(mktemp -d)
+	trap 'rm -rf "$caller"' EXIT
+	mkdir -p "$caller/.github/workflows"
+	cp .github/workflows/remain.yml "$caller/.github/workflows/"
+	cp .github/actionlint.yaml "$caller/.github/"
+	awk '/^```yaml$/ { inside = 1; next } /^```$/ { inside = 0 } inside' README.md |
+		sed 's|cutenode/remain/.github/workflows/remain.yml@<commit sha>|./.github/workflows/remain.yml|' \
+			>"$caller/.github/workflows/caller.yml"
+	if ! grep -q 'uses: ./.github/workflows/remain.yml' "$caller/.github/workflows/caller.yml"; then
+		echo "README.md has no caller workflow for remain.yml" >&2
+		exit 1
+	fi
+	git -C "$caller" init --quiet
+	(cd "$caller" && actionlint)
 fi

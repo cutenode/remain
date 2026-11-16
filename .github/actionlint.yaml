@@ -1,0 +1,7 @@
+# actionlint 1.7.12 doesn't know job.workflow_repository and job.workflow_sha yet, which GitHub
+# documents for reusable workflows (https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context).
+# Drop this once https://github.com/rhysd/actionlint/pull/707 is released.
+paths:
+  .github/workflows/remain.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
