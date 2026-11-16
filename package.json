@@ -1,6 +1,6 @@
 {
 	"name": "remain",
-	"version": "0.0.0",
+	"version": "0.1.0",
 	"private": true,
 	"description": "Merges main into conflicting pull requests when the conflicts are mechanical",
 	"license": "MIT",
